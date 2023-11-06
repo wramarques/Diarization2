@@ -1,5 +1,4 @@
 import os
-import ptvsd
 import streamlit as st
 import subprocess
 from pydub import AudioSegment
@@ -127,6 +126,7 @@ def main():
         st.session_state['disabled'] = False
         
     if (not isStreamlitDeploy):
+        import ptvsd
         # run application by command streamlit run main.py
         ptvsd.enable_attach(address=('localhost', 8501))
         # Bloque si pas en debug distant
