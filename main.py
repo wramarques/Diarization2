@@ -76,12 +76,6 @@ def millisec(timeStr):
 #openai.api_key = openAI_api_key
 #hugginFace_api_key="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" #os.environ["hugginFace_api_key"]
 
-#fileToDiarize="Onliz.m4a"
-fileToDiarize="Table2.wav"
-wavFileToDiarize="audio.wav"
-DiarizationTxtFile="diarization.txt"
-DiarizationWaveFile="dz.wav"
-
 def CreateDir_if_not_exists(directoryName: str) -> bool:
     path = os.path.dirname(os.path.realpath(__file__)) + '/'+ directoryName
     # Check whether the specified path exists or not
@@ -119,6 +113,12 @@ def save_uploadedfile(uploadedfile, fileNameDest ):
     st.success(f"Saved File: {fileNameDest} to working dir.")        
 
 def main():
+
+    #fileToDiarize="Onliz.m4a"
+    fileToDiarize="Table2.wav"
+    wavFileToDiarize="audio.wav"
+    DiarizationTxtFile="diarization.txt"
+    DiarizationWaveFile="dz.wav"
 
     # Check if 'key' already exists in session_state
     # If not, then initialize it
