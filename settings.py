@@ -1,4 +1,4 @@
 ###
 
 ##
-isStreamlitCloudVersion=False
+isStreamlitCloudVersion=True
