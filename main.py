@@ -157,6 +157,7 @@ def main():
 
         with st.spinner("Working... please wait..."):
 
+            print(f"- fileToDiarize: {fileToDiarize}")
             ffmepgExtracWavFile(fileToDiarize,wavFileToDiarize)
 
             spacermilli = 2000
