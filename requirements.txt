@@ -1,11 +1,10 @@
 ffmpeg-python
 pydub==0.25.1
-whisper==1.1.10
+openai==0.27.4
+openai_whisper==20230314
 webvtt-py
 pysrt
 pyannote.audio
 pyannote.core
 pyannote.pipeline
 streamlit==1.21.0
-soundfile
-openai==0.27.4
