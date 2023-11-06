@@ -135,6 +135,8 @@ def main():
     st.set_page_config(page_title='Audio Diarization')
 
     openAI_api_key= st.text_input('openAI Api Key', placeholder='openAI_api_key')
+    openai.api_key = openAI_api_key
+
     hugginFace_api_key= st.text_input('HuggingFace API Key', placeholder='huggin_face_api_key')
 
     uploaded_file = st.file_uploader("Choose a file")
