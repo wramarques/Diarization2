@@ -3,8 +3,8 @@ pydub==0.25.1
 whisper==1.1.10
 webvtt-py
 pysrt
-pyannote.audio==2.1.1
-pyannote.core==4.5
+pyannote.audio
+pyannote.core
 pyannote.pipeline
 streamlit==1.21.0
 soundfile
