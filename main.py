@@ -1,22 +1,67 @@
+# ##################################################
+# Project Diarization based on:
+#       - Pyanote for Diarization process
+#       - Streamlit for user interface
+#       - Google Cloud to store steps in process flow
+#       - User access control defined in config.yaml => a folder by user where datas are stored (see below how to generate password)
+# ##################################################
+# Google cloud elements (see gcp_service_account section in secret.toml file )
+# ##################################################
+# IAM Access https://console.cloud.google.com/iam-admin/serviceaccounts/details/103394789504793451452/keys?hl=fr&project=diarization-407413
+# Google Cloud BigQuery Database => https://console.cloud.google.com/bigquery?hl=fr
+#                                   https://console.cloud.google.com/bigquery?hl=fr&project=diarization-407413&ws=!1m0
+# https://console.cloud.google.com/bigquery?hl=fr&project=diarization-407413&ws=!1m10!1m4!4m3!1sdiarization-407413!2sdiarization!3sProcess!1m4!1m3!1sdiarization-407413!2sbquxjob_52202be3_18c44b90635!3sEU
+
 import os
 import streamlit as st
 import subprocess
 from pydub import AudioSegment
 from pyannote.audio import Pipeline
 from pyannote.audio.pipelines.utils.hook import ProgressHook
-import re
-import whisper
+from pyannote.database import loader
+from pyannote.database import util
+# Util files to construct segments
+from pyannote_whisper.utils import dz_segment_to_text
+
 #import pysrt
 from whisper.utils import get_writer
 import whisperTools
+import fileTools
 import openai
-import unicodedata
+from PIL import Image
+import pandas as pd
+
+#############
+# Use this method to geneate a password to store in yaml file
+#############
+#auth = sa.Authenticator(
+#    "fdDGdffgf45645656465",
+#   token_url="/token",
+#    token_ttl=3600,
+#   password_hashing_method=sa.PasswordHashingMethod.BCRYPT,
+#)
+#hashed_passwords = sa.Hasher(['password de will']).generate()
+
+#############
+# Manage Authentification
+# https://blog.streamlit.io/streamlit-authenticator-part-1-adding-an-authentication-component-to-your-app/
+#############
+import streamlit_authenticator as sa
+import yaml
+from yaml.loader import SafeLoader
 
 #############
 # Deploy StreamLit
 #############
 import settings
 isStreamlitDeploy=  settings.isStreamlitCloudVersion
+
+########
+#Activate login
+########
+activateLogin=True
+if(not isStreamlitDeploy):
+    activateLogin=True
 
 # Editialis account
 # hugginFace_api_key=os.environ["hugginFace_api_key"]
@@ -30,36 +75,73 @@ isStreamlitDeploy=  settings.isStreamlitCloudVersion
 
 dir_path = os.path.dirname(os.path.realpath(__file__))
 
-def ffmepgExtracWavFile(videoName,dest_file_name):
+cwd = os.getcwd()
+with open(cwd+'/config.yaml') as file:
+    config = yaml.load(file, Loader=SafeLoader)
+
+authenticator = sa.Authenticate(
+    config['credentials'],
+    config['cookie']['name'],
+    config['cookie']['key'],
+    config['cookie']['expiry_days'],
+    config['preauthorized']
+)
+
+def ffmepgExtracWavFile(dir_path,videoName,dest_file_name, limitSeconds=-1):
     # WR Test
     #ffmpeg -i videoName -vn -ac 1 -ar 16000 -ab 320k -y -f wav output.wav
     #videoName="Onliz.m4a"
     #dest_file_name="audio.wav"
-    command = "ffmpeg -i "+ dir_path +'/' + videoName + " -vn -ac 1 -ar 16000 -ab 320k -y -f wav "+  dest_file_name
+    # t time in seconds
+    if(limitSeconds!=-1):
+        command = "ffmpeg -i "+ dir_path +'/' + videoName + "  -t "+ str(limitSeconds) +" -vn -ac 1 -ar 16000 -ab 320k -y -f wav "+ dir_path + '/' + dest_file_name
+    else:
+        command = "ffmpeg -i "+ dir_path +'/' + videoName + " -vn -ac 1 -ar 16000 -ab 320k -y -f wav "+ dir_path + '/' + dest_file_name
     print(command)
     subprocess.call(command, shell=True)
     #!ffmpeg -i Onliz.m4a -vn -ac 1 -ar 16000 -ab 320k -y -f wav onliz.wav
 
-def _getDiarizationPipeline(use_auth_token,audioFile):
+def _getDiarizationPipeline(use_auth_token,dir_path,audioFile, activatePreloadMemory=False):
     # Instantiate the pipeline
-    pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.0",use_auth_token=use_auth_token)
+    print (f" Token size : {len(use_auth_token)} ")
+    pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1",use_auth_token=use_auth_token)
+    #pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization@2.1",use_auth_token=use_auth_token)
 
     import torch
+    # cuda if gpu detected
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"- Device:{device}")    
+
+    print(f"- File: {dir_path +'/'+ audioFile}")    
+
     if(device=="cuda"):
         pipeline = pipeline.to(torch.device('cuda:0'))
 
-    FILE = {'uri': 'blabla', 'audio': audioFile}
+    FILE = {'uri': 'blabla', 'audio': dir_path +'/'+ audioFile}
 
-    # Preloading file in memory to speed up treatment
-    import torchaudio
-    waveform, sample_rate = torchaudio.load(audioFile)
-    diarization = pipeline({"waveform": waveform, "sample_rate": sample_rate})
+    diarization= None
+    if(activatePreloadMemory):
+        print(f"- Preloading file in memory to speed up treatment")    
+        # Preloading file in memory to speed up treatment
+        import torchaudio
+        waveform, sample_rate = torchaudio.load(dir_path+'/'+audioFile)
+        # return  Segments : Tuple with additionnal features 
+        # https://pyannote.github.io/pyannote-core/structure.html#segment
+        # https://github.com/pyannote/pyannote-audio/blob/develop/tutorials/applying_a_pipeline.ipynb
 
-    #  with ProgressHook() as hook:
-    #    diarization = pipeline(FILE, hook=hook)
-    #diarization = pipeline(FILE)
+        # Le hook pose pb en prod
+        if isStreamlitDeploy:
+            diarization = pipeline({"waveform": waveform, "sample_rate": sample_rate})
+        else:
+            with ProgressHook() as hook:
+                diarization = pipeline({"waveform": waveform, "sample_rate": sample_rate}, hook=hook)
+    else:
+        if isStreamlitDeploy:
+            diarization = pipeline(dir_path+'/'+audioFile)
+        else:
+            with ProgressHook() as hook:
+                diarization = pipeline(dir_path+'/'+audioFile, hook=hook)
+    print ("End diarization process")
     return diarization
 
 def writeDiarizationFile(diarizationFileName,dz):
@@ -71,55 +153,13 @@ def millisec(timeStr):
   s = (int)((int(spl[0]) * 60 * 60 + int(spl[1]) * 60 + float(spl[2]) )* 1000)
   return s
 
-# Editialis account
-#openAI_api_key=os.environ["openAI_api_key"]
-#openai.api_key = openAI_api_key
-#hugginFace_api_key="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" #os.environ["hugginFace_api_key"]
-
-def CreateDir_if_not_exists(directoryName: str) -> bool:
-    path = os.path.dirname(os.path.realpath(__file__)) + '/'+ directoryName
-    # Check whether the specified path exists or not
-    isExist = os.path.exists(path)
-    if not isExist:
-        # Create a new directory because it does not exist
-        os.makedirs(path)
-        return True
-    return False
-
-dirData=''
-xx=CreateDir_if_not_exists(dirData)
-
-dir_path = os.path.dirname(os.path.realpath(__file__))
-
-output_path =  dir_path+'/'+dirData
-working_path = dir_path
-
-def normalize_filename(value: str) -> str:
-    """
-    Normalizes string to ASCII, removes non-alpha characters, and converts spaces to underscores.
-    """
-    value = str(value)
-    value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
-    value = re.sub(r"[^\w\s-]", "", value).strip()
-    return re.sub(r"[-\s]+", "_", value) 
-
-# Disable button after it is clicked
 def disable():
+    """
+    Disable button after it is clicked
+    """
     st.session_state.disabled = True
 
-def save_uploadedfile(uploadedfile, fileNameDest ):
-    with open(os.path.join(output_path,fileNameDest),"wb") as f:
-        f.write(uploadedfile.getbuffer())
-    st.success(f"Saved File: {fileNameDest} to working dir.")        
-
-def main():
-
-    #fileToDiarize="Onliz.m4a"
-    fileToDiarize="Table2.wav"
-    wavFileToDiarize="audio.wav"
-    DiarizationTxtFile="diarization.txt"
-    DiarizationWaveFile="dz.wav"
-
+def main_application(dir_path,output_path,working_path):
     # Check if 'key' already exists in session_state
     # If not, then initialize it
     if 'key' not in st.session_state:
@@ -132,211 +172,185 @@ def main():
         # Bloque si pas en debug distant
         # ptvsd.wait_for_attach() # Only include this line if you always want to attach the debugger
 
-    st.set_page_config(page_title='Audio Diarization')
+    if (isStreamlitDeploy and not activateLogin):
+            openAI_api_key= st.text_input('openAI Api Key', placeholder='openAI_api_key')
+            hugginFace_api_key= st.text_input('HuggingFace API Key', placeholder='huggin_face_api_key')
+    else:
+        #openAI_api_key= os.environ["openAI_api_key"]
+        openAI_api_key= st.secrets.openai.openAI_api_key
+        hugginFace_api_key= st.secrets.huggingface.hugginFace_api_key
 
-    openAI_api_key= st.text_input('openAI Api Key', placeholder='openAI_api_key')
     openai.api_key = openAI_api_key
 
-    hugginFace_api_key= st.text_input('HuggingFace API Key', placeholder='huggin_face_api_key')
+    radioDiarizationWaveToMemory = st.radio(    "Diarization : Load wave in memory  ", ('No', 'Yes'))
+    radioActivateWhisperAPI  = st.radio(    "Whisper via API ", ('Yes', 'No'))
+
+    activateDiarizationWaveToMemory = True if radioDiarizationWaveToMemory=="Yes" else False    
+    activateActivateWhisperAPI = True if radioActivateWhisperAPI=="Yes" else False    
+
+    # Get Wav Files 
+    dfWav_Files= fileTools.directory_to_dataframe(working_path,".wav")
+    listWaveFiles=list(dfWav_Files['Name'])
+    listWaveFiles.insert(0,'-')
+    optionWaveFile = st.selectbox('Wave files to process',listWaveFiles )
+
+    # Get DZ Files in rttm format located in user folder 
+    dfDiarzation_Files= fileTools.directory_to_dataframe(working_path,".rttm")
+    listDiarzation=list(dfDiarzation_Files['Name'])
+    listDiarzation.insert(0,'-')
+    optionDiarizationFile = st.selectbox('Diarization file to process',listDiarzation )
+
+    # Get ASR Files located in user folder 
+    dfASR_Files= fileTools.directory_to_dataframe(working_path,".asr_result")
+    listASR=list(dfASR_Files['Name'])
+    listASR.insert(0,'-')
+    optionASRFile = st.selectbox('ASR File to process',listASR )
+    #st.write('You selected:', optionASRFile)
 
     uploaded_file = st.file_uploader("Choose a file")
 
     if uploaded_file is not None:
-        # To read file as bytes:
-        #bytes_data = uploaded_file.getvalue()
-        #st.write( working_path+"/" bytes_data)    
-        fileToDiarize=normalize_filename(uploaded_file.name)
-        save_uploadedfile(uploaded_file,fileToDiarize)
-
+        # Get normalized name of file of uploaded file (video, audio..)
+        fileToDiarize=fileTools.normalize_filename(uploaded_file.name)
+        fileTools.save_uploadedfile(working_path,uploaded_file,fileToDiarize)
 
     if st.button('Run',  on_click=disable, disabled=st.session_state.disabled):
-        st.text("Begin of magic !\n - ")
-
-        #vtt_transcribre= whisperTools.whisper_openai_wav_to_vtt(dir_path,"Table2.wav")
-        #with open("test.txt", "w") as text_file:
-        #text_file.write(str(vtt_transcribre))
-        #global_vtt_file =whisperTools.whisper_openai_wav_to_vtt(dir_path,wavFileToDiarize)
+        st.text("Begin of magic !\n")
 
         with st.spinner("Working... please wait..."):
 
-            print(f"- fileToDiarize: {fileToDiarize}")
-            ffmepgExtracWavFile(fileToDiarize,wavFileToDiarize)
+            if ('-' in optionDiarizationFile and '-' in optionASRFile and '-' in optionWaveFile):
 
-            spacermilli = 2000
-            print("- Get Audio from WAV")
-            audio = AudioSegment.from_wav(wavFileToDiarize)
+                print(f"- fileToDiarize: {fileToDiarize}")
 
-            print("- Set spacer")
-            spacer = AudioSegment.silent(duration=spacermilli)
+                if isStreamlitDeploy:
+                    limitSecondsVideoToProcess=-1
+                else:
+                    limitSecondsVideoToProcess=30
 
-            print("- Append spacer")           
-            audio = spacer.append(audio, crossfade=0)
+                # Add Prefixe to extract wav file that will be pass to Diarization process
+                wavFileToDiarize = "dz-"+ fileTools.forceFileNameExtension(fileToDiarize, "wav")
+                ffmepgExtracWavFile(output_path, fileToDiarize,wavFileToDiarize, limitSeconds=limitSecondsVideoToProcess)
 
-            print("- Export wavfile with spacer")           
-            audio.export(wavFileToDiarize, format='wav')
+                # Add spacer to file
+                spacermilli = 5000
+                print("- Get Audio from WAV")
+                audio = AudioSegment.from_wav(output_path+"/"+wavFileToDiarize)
 
-            st.text("\t\t- Start Diarzation Pipeline")
-            print("- Début diarization pipeline")
-            dz=_getDiarizationPipeline(hugginFace_api_key,wavFileToDiarize)
-            print("- Fin diarization pipeline")
-            st.text("\t\t- End Diarzation Pipeline")
+                print("- Define spacer")
+                spacer = AudioSegment.silent(duration=spacermilli)
 
-            print(*list(dz.itertracks(yield_label = True))[:10], sep="\n")
-            # Ecriture fichier de Diarization (time stamp début/fin et locuteur)
-            st.text("\t\t- Write Diarzation file")
-            writeDiarizationFile(DiarizationTxtFile,dz)
+                print("- Add spacer on begging of wave file ")           
+                audio = spacer.append(audio, crossfade=0)
 
-            # Lecture du fichier de Diarization et création de la liste de dzList qui qui comprend : tiestampStart,timeStampEnd, isLex (speaker 01)
-            dz = open(DiarizationTxtFile).read().splitlines()
-            dzList = []
-            for l in dz:
-                start, end =  tuple(re.findall('[0-9]+:[0-9]+:[0-9]+\.[0-9]+', string=l))
-                start = millisec(start) - spacermilli
-                end = millisec(end)  - spacermilli
-                lex = not re.findall('SPEAKER_01', string=l)
-                speaker=re.findall('SPEAKER_\d+', string=l)[0]
-                dzList.append([start, end, lex,speaker])
+                print(f"- Export wavfile with spacer added {wavFileToDiarize}] ")           
+                audio.export(output_path + "/" +wavFileToDiarize, format='wav')
+                # / Add spacer to file
 
-            # Debug de controle
-            print(*dzList[:10], sep='\n')
+                st.audio(output_path+"/"+wavFileToDiarize, format="audio/wav", start_time=0)
 
-            # Preparing audio file from the diarization - Add spacer after each segment and produce
-            # a specific wav file with spacer added.
-            # sounds is an audio segment
-            st.text("\t\t-Prepare audio file for Diarirzation")
+                st.text("\t\t- Start Diarization Pipeline")
+                print("- Début diarization pipeline")
+                dz=_getDiarizationPipeline(hugginFace_api_key, output_path, wavFileToDiarize, activateDiarizationWaveToMemory)
+                # Backup dz file for debug usage
+                #fileTools.writeJsonFile(output_path + "/"+ fileTools.forceFileNameExtension(fileToDiarize, "dz"), dz._tracks)
+                print("- End diarization pipeline")
+                st.success(' Diarization Pipeline', icon="✅")
 
-            sounds = spacer
-            segments = []
+                # For debugging purpose- Save diarization file
+                dzFileContent="\n".join(dz_segment_to_text(dz))
+                fileTools.writeTextFile(output_path + "/"+ fileTools.forceFileNameExtension(fileToDiarize, "dz"), dzFileContent)
 
-            dz = open(DiarizationTxtFile).read().splitlines()
-            for l in dz:
-                start, end =  tuple(re.findall('[0-9]+:[0-9]+:[0-9]+\.[0-9]+', string=l))
-                start = int(millisec(start)) #milliseconds
-                end = int(millisec(end))  #milliseconds
+                # dump the diarization output to disk using RTTM format
+                with open(output_path + "/"+ fileTools.forceFileNameExtension(fileToDiarize, "rttm"),'w') as rttm:
+                    dz.write_rttm(rttm)                    
+            else:
+                #dz = loader.RTTMLoader(output_path + "/"+ optionDiarizationFile)
+                loadRTTM= util.load_rttm(output_path + "/"+ optionDiarizationFile,  keep_type="SPEAKER")
+                firstKey=list(loadRTTM.keys())[0]
+                dz=loadRTTM[firstKey]
+                wavFileToDiarize=optionWaveFile
 
-                # Ajout de la longeur (en ms) du segment total après chaque itération(première itération un spacer 2000ms par défaut)
-                # [2000, 6649, 9464, 16812, 19372, 26686, 29586, 34302]
-                # 
-                segments.append(len(sounds))
+            final_diarization=whisperTools.diarize_wav(output_path,wavFileToDiarize,dz,whisperViaApi=activateActivateWhisperAPI)
 
-                # Ajout dans sound du segment correspondant (audio est le wav fichier à diarizer)
-                sounds = sounds.append(audio[start:end], crossfade=0)
-                #Ajout du spacer
-                sounds = sounds.append(spacer, crossfade=0)
+            currentSpk= ""
+            backupTxt=""
+            segmentTxt=""
+            for seg, spk, sent in final_diarization:
+                line=""
+                segmentTxt = segmentTxt + f'{seg.start:.2f} => {seg.end:.2f} {spk}\n '
+                if(currentSpk!=spk and spk is not None):
+                    line = line + f'## {spk}\n'
+                    currentSpk=spk
 
-            # Sauvegarde du wav avec les segments de spacer
-            sounds.export(DiarizationWaveFile, format="wav") #Exports to a wav file in the current path.
+                line = line + f'{sent}'
+                print(line)
+                st.markdown(line, unsafe_allow_html=True)
+                backupTxt = backupTxt +  line +'\n'
 
-            # Debug, affichage des premiers segments
-            print(segments[:8])
+            debugSegments =  '\n\n\n'+ "Debug segments" +'\n' + segmentTxt
 
-            #command = "whisper dz.wav --language fr --model large --output_format vtt --output_dir " +dir_path
-            #print(command)      
-            #subprocess.call(command, shell=True)
+            with st.expander("Debug"):
+                splitDebug = debugSegments.split("\n")
+                for txt in splitDebug:
+                    st.write(txt)
+            
+            backupTxt = backupTxt + debugSegments
 
-            # Application du modèle Whisper sur le wav de diarizaiton (avec les spacers)
-            print("Début application du model Whisper")
-            st.text("\t\t-Generate global vtt file")
-            # base small medium large
-            #model = whisper.load_model("small")
-            #audio=DiarizationWaveFile
-            #result = model.transcribe(audio, language='fr')
-            global_vtt_file =whisperTools.whisper_openai_wav_to_vtt(dir_path,wavFileToDiarize)
-            #print("Fin d'application du model Whisper")
+            fileTools.writeTextFile( output_path+"/"+ wavFileToDiarize+".transcript.txt" ,backupTxt)
 
-            # Sauvegarde au format VTT
-            # vtt is similar to the SRT format except that it accommodates text formatting, positioning, and rendering options 
-            # (pop-up, roll-on, paint-on, etc.). It has quickly gained popularity because it is the caption format of choice for HTML5 text track rendering
-            # Save as a VTT file
-            # Set some initial options values
-            #options = {
-            #    'max_line_width': None,
-            #    'max_line_count': None,
-            #    'highlight_words': False
-            #}
-            #vtt_writer = get_writer("vtt", dir_path)
-            #vtt_writer(result, audio,options)
+def setPath():
 
-            # Lecture du fichier VTT dans la variable caption
-            import webvtt
-            captions = [[(int)(millisec(caption.start)), (int)(millisec(caption.end)),  caption.text] for caption in webvtt.read(global_vtt_file)]
-            print(*captions[:8], sep='\n')
+    dirData=''
 
-            preS = '''
-                    <!DOCTYPE html>\n<html lang="fr">\n  
-                    <head>\n    
-                        <meta charset="UTF-8">\n    
-                        <meta name="viewport" content="width=device-width, initial-scale=1.0">\n    
-                        <meta http-equiv="X-UA-Compatible" content="ie=edge">\n    
-                        <title>Lexicap</title>\n    
-                        <style>\n        
-                            body {\n            font-family: sans-serif;\n            font-size: 18px;\n            color: #111;\n            padding: 0 0 1em 0;\n        }\n
-                            .l {\n          color: #050;\n        }\n        
-                            .s {\n            display: inline-block;\n        }\n        
-                            .e {\n            display: inline-block;\n        }\n        
-                            .t {\n            display: block; clear:both; margin-top:30px;\n        }\n        
-                        </style>\n  
-                    </head>\n  
-                    <body>\n    <h2>Video Diarization</h2>\n  
-                    <br>\n'''
-            postS = '\t</body>\n</html>'
+    dir_path = os.path.dirname(os.path.realpath(__file__))
 
-            from datetime import timedelta
+    if(st.session_state["authentication_status"]):
+        resultCreate= fileTools.CreateDir_if_not_exists(st.session_state["username"] )
+        output_path =  dir_path+'/'+ st.session_state["username"] 
+        working_path = output_path 
+    else:
+        resultCreate= fileTools.CreateDir_if_not_exists(dirData)
+        output_path =  dir_path
+        working_path = output_path 
 
-            html = list(preS)
+    return dir_path,output_path,working_path
 
-            speaker=dzList[0][3]
-            activateSpeakerLabel=True
-            lexicap=""
+def main():
+    #st.set_page_config(page_title='Audio Diarization')
 
-            for i in range(len(segments)):
-                idx = 0
-                for idx in range(len(captions)):
-                    if captions[idx][0] >= (segments[i] - spacermilli):
-                        break;
+    image = Image.open('logo.png')
+    st.image(image,width=400 )
 
-                while (idx < (len(captions))) and ((i == len(segments) - 1) or (captions[idx][1] < segments[i+1])):
-                    c = captions[idx]
 
-                    print(f"{str(c[0])}-{str(c[1])}:{c[2]}")
-                    
-                    start = dzList[i][0] + (c[0] -segments[i])
-                    if(speaker!=dzList[i][3] or idx==0):
-                        speaker=dzList[i][3]
-                        activateSpeakerLabel=True
-                    else:
-                        activateSpeakerLabel=False
+#    if (not isStreamlitDeploy):
+        #dirData='data'
+#        dirData=''
 
-                    if start < 0:
-                        start = 0
-                    idx += 1
+    if activateLogin:
+        name, authentication_status, username = authenticator.login('Login', 'main')
 
-                    start = start / 1000.0
-                    startStr = '{0:02d}:{1:02d}:{2:02.2f}'.format((int)(start // 3600),
-                                                            (int)(start % 3600 // 60),
-                                                            start % 60)
-                    if(activateSpeakerLabel):
-                        html.append(f'\t\t\t\t<div class="t"><strong>{speaker}:</strong> </div>\n')
-                        lexicap=lexicap+f"\n\n**{speaker}**\n"
+        if authentication_status:
+            authenticator.logout('Logout', 'main')
+            dir_path,output_path,working_path =setPath()
 
-                    #html.append('\t\t\t<div class="c">\n')
-                    #html.append(f'\t\t\t\t<a class="l" href="#{startStr}" id="{startStr}">link</a> |\n')
-                    #html.append(f'\t\t\t\t<div class="s"><a href="javascript:void(0);" onclick=setCurrentTime({int(start)})>{startStr}</a></div>\n')
-                    #html.append(f'\t\t\t\t<div class="t">{"[Lex]" if dzList[i][2] else "[Yann]"} {c[2]}</div>\n')
-                    #html.append(f'\t\t\t\t<div class="t">{c[2]}</div>\n')
-                    html.append(f'{c[2]}')
-                    lexicap=lexicap+f"{c[2]} "
-                    #html.append('\t\t\t</div>\n\n')
+            # Get Files located in user folder 
+            dfFiles= fileTools.directory_to_dataframe(working_path)
 
-            html.append(postS)
-            s = "".join(html)
-
-            with open(file="lexicap.html", mode="w",encoding="utf8") as text_file:
-                text_file.write(s)
-                text_file.write(lexicap)
-            #st.text_area("Lexicap", s,height=400)
-            #print(s)
-            st.markdown(lexicap, unsafe_allow_html=True)
+            # Write list files in  
+            if(not (dfFiles is None) and len(dfFiles)>0):
+                fileTools.create_tabe_df(dfFiles,st.sidebar)
+            
+            main_application(dir_path,output_path,working_path)
+            #st.write(f'Welcome *{name}*')
+            #st.title('Some content')
+        elif authentication_status == False:
+            st.error('Username/password is incorrect')
+        elif authentication_status == None:
+            st.warning('Please enter your username and password')
+    else:
+        dir_path,output_path,working_path =setPath()
+        main_application(dir_path,output_path,working_path)
 
 if __name__ == '__main__':
     main()
