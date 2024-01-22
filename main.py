@@ -176,11 +176,18 @@ def main_application(dir_path,output_path,working_path):
             openAI_api_key= st.text_input('openAI Api Key', placeholder='openAI_api_key')
             hugginFace_api_key= st.text_input('HuggingFace API Key', placeholder='huggin_face_api_key')
     else:
-        #openAI_api_key= os.environ["openAI_api_key"]
-        openAI_api_key= st.secrets.openai.openAI_api_key
-        hugginFace_api_key= st.secrets.huggingface.hugginFace_api_key
+        # En déploiement sur HF les clés sont récupérées via le paramétrage dans les settings
+        if (isStreamlitDeploy):
+            openAI_api_key= os.environ["openAI_api_key"]
+            hugginFace_api_key= os.environ["hugginFace_api_key"]            
+        else:
+            # En local on passe par le fichier toml
+            openAI_api_key= st.secrets.openai.openAI_api_key
+            hugginFace_api_key= st.secrets.huggingface.hugginFace_api_key
 
     openai.api_key = openAI_api_key
+    # Set default variable
+    optionDiarizationFile=""
 
     radioDiarizationWaveToMemory = st.radio(    "Diarization : Load wave in memory  ", ('No', 'Yes'))
     radioActivateWhisperAPI  = st.radio(    "Whisper via API ", ('Yes', 'No'))
@@ -190,22 +197,25 @@ def main_application(dir_path,output_path,working_path):
 
     # Get Wav Files 
     dfWav_Files= fileTools.directory_to_dataframe(working_path,".wav")
-    listWaveFiles=list(dfWav_Files['Name'])
-    listWaveFiles.insert(0,'-')
-    optionWaveFile = st.selectbox('Wave files to process',listWaveFiles )
+    if( dfWav_Files is not None and len(dfWav_Files)>0):
+        listWaveFiles=list(dfWav_Files['Name'])
+        listWaveFiles.insert(0,'-')
+        optionWaveFile = st.selectbox('Wave files to process',listWaveFiles )
 
     # Get DZ Files in rttm format located in user folder 
     dfDiarzation_Files= fileTools.directory_to_dataframe(working_path,".rttm")
-    listDiarzation=list(dfDiarzation_Files['Name'])
-    listDiarzation.insert(0,'-')
-    optionDiarizationFile = st.selectbox('Diarization file to process',listDiarzation )
+    if(dfDiarzation_Files is not None and len(dfDiarzation_Files)>0):
+        listDiarzation=list(dfDiarzation_Files['Name'])
+        listDiarzation.insert(0,'-')
+        optionDiarizationFile = st.selectbox('Diarization file to process',listDiarzation )
 
     # Get ASR Files located in user folder 
     dfASR_Files= fileTools.directory_to_dataframe(working_path,".asr_result")
-    listASR=list(dfASR_Files['Name'])
-    listASR.insert(0,'-')
-    optionASRFile = st.selectbox('ASR File to process',listASR )
-    #st.write('You selected:', optionASRFile)
+    if(dfASR_Files is not None and len(dfASR_Files)>0):
+        listASR=list(dfASR_Files['Name'])
+        listASR.insert(0,'-')
+        optionASRFile = st.selectbox('ASR File to process',listASR )
+        #st.write('You selected:', optionASRFile)
 
     uploaded_file = st.file_uploader("Choose a file")
 
@@ -226,7 +236,7 @@ def main_application(dir_path,output_path,working_path):
                 if isStreamlitDeploy:
                     limitSecondsVideoToProcess=-1
                 else:
-                    limitSecondsVideoToProcess=30
+                    limitSecondsVideoToProcess=-1
 
                 # Add Prefixe to extract wav file that will be pass to Diarization process
                 wavFileToDiarize = "dz-"+ fileTools.forceFileNameExtension(fileToDiarize, "wav")

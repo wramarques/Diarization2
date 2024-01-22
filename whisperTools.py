@@ -1,11 +1,14 @@
 import os
 import math
 from pydub import AudioSegment
-import streamlit as st
 import openai
-import re
-from whisper.utils import get_writer
-from webvtt import WebVTT, Caption
+import whisper
+from pyannote_whisper.utils import diarize_text
+from pyannote.core import Segment
+import datetime
+import json
+import streamlit as st
+import fileTools
 
 def chunk_wav_file(output_path,wav_file_name, chunk_threshold_mb=25):
 
@@ -75,94 +78,127 @@ def millisec_to_hms(millisec):
         strMilliSec=str(milliseconds)        
     return f"{strHour}:{strMinutes}:{strSeconds}.{strMilliSec}" 
 
-def whisper_openai_wav_to_vtt(output_path,wav_file_name):
+def diarize_wav(output_path,wav_file_name,diarization_result,whisperViaApi=True):
 
     # Whisper is an Automatic Speech Recognition (ASR) developped by OpenIA
     # https://github.com/openai/whisper
-    result = ""
-    global_vtt_file="global_"+wav_file_name.replace(".wav",".vtt")
-    
     chunks_total =chunk_wav_file(output_path,wav_file_name)
     
     # load entire file
     # Auto Chuncking with opena ai audio transcribe
     # https://platform.openai.com/docs/guides/speech-to-text
     #my_bar = st.progress(1, text="Processing chunks")
-    if True:
-        for x in range(chunks_total):
 
-            #my_bar.progress((x+1)/chunks_total, text=" Processing chunks: " + str(x+1) + "/"+str(chunks_total))
-            file_to_process= str(x) + "-" + wav_file_name
-            fullPath_file_to_process=output_path+"/" + file_to_process
-            print(f" processing openAI transcribe for : {fullPath_file_to_process}")
-            audio_file = open(fullPath_file_to_process, "rb")
-
-            # https://platform.openai.com/docs/guides/speech-to-text
-            # The Whisper v2-large model is currently available through our API with the whisper-1 model name.
-            # Underlying api call : https://platform.openai.com/docs/api-reference/audio/create
-            # See prompt parameter
-            # https://platform.openai.com/docs/guides/speech-to-text
-            result = openai.Audio.transcribe(
-                model="whisper-1", 
-                file=audio_file,
-                language="fr",
-                response_format="vtt"
-            )
-
-            vtt_file_name=file_to_process.replace(".wav",".vtt")
-            # Save as a VTT file
-            with open(file=vtt_file_name, mode="w",encoding="utf8") as vtt_file:
-                vtt_file.write(result)
-
-    offsetMilliSeconds=0
-    vtt = WebVTT()
+    final_result =[]
+    offset=0
 
     for x in range(chunks_total):
         file_to_process= str(x) + "-" + wav_file_name
-        vtt_file_name=file_to_process.replace(".wav",".vtt")
+        fullPath_file_to_process=output_path+"/" + file_to_process
 
-        # Lecture du fichier VTT dans la variable caption
-        captions = [[(int)(millisec(caption.start)), (int)(millisec(caption.end)),  caption.text] for caption in WebVTT.read(vtt_file_name)]
-        print(*captions[:8], sep='\n')
-
-        # Get offset by last elements in captions for first file
-        if(x==0):
-            offsetMilliSeconds=offsetMilliSeconds+captions[len(captions)-1][1]
-            for idxCaption in range(len(captions)-1):
-
-                # creating global caption
-                caption = Caption(
-                    millisec_to_hms(captions[idxCaption][0]),
-                    millisec_to_hms(captions[idxCaption][1]),
-                    captions[idxCaption][2]
+        print(f" Processing openAI transcribe for : {fullPath_file_to_process}")
+        audio_file = open(fullPath_file_to_process, "rb")
+        # https://github.com/openai-php/client/issues/59
+        # Difference response formats
+        asr_result=""
+        if(whisperViaApi):
+            print(f" => Processing via OpenAI API")
+            asr_result = openai.Audio.transcribe(
+                model="whisper-1", 
+                file=audio_file,
+                language="fr",
+                response_format="verbose_json"
                 )
-                vtt.captions.append(caption)
+        else:
+            print(f" => Processing via OpenAI local model")            
+            import settings
+            isStreamlitDeploy=  settings.isStreamlitCloudVersion
+            modelSize="small"
+            #modelSize="large"
+            if(isStreamlitDeploy):
+                modelSize="large"
 
-        # Apply offset
-        if(x>0):
-            for idxCaption in range(len(captions)-1):
-                captions[idxCaption][0]=captions[idxCaption][0]+offsetMilliSeconds
-                captions[idxCaption][1]=captions[idxCaption][1]+offsetMilliSeconds
+            print(f"- Whisper model size => {modelSize}")    
+            model = whisper.load_model(modelSize)
+            asr_result = model.transcribe(fullPath_file_to_process, language='fr')
 
-                # creating global caption
-                caption = Caption(
-                    millisec_to_hms(captions[idxCaption][0]),
-                    millisec_to_hms(captions[idxCaption][1]),
-                    captions[idxCaption][2]
-                )
-                vtt.captions.append(caption)
+        fileTools.writeJsonFile(fullPath_file_to_process+".asr_result" ,asr_result)
 
-            # Increment offset
-            offsetMilliSeconds=offsetMilliSeconds+captions[len(captions)-1][1]
+        st.success(f' {str(x+1)}/{str((chunks_total))} - Transcribe chunk: {wav_file_name}', icon="✅") 
 
-        #print(captions[0][0])
-        #print(millisec_to_hms(captions[0][0]))
-        #captions = webvtt.read(vtt_file_name)
-        #print(captions[0].start)
-        #captions[0].start = '00:00:01.250'
-        #print(captions[0].start)
+        if (final_result is None or len(final_result)==0):
+            final_result = diarize_text(asr_result, diarization_result)
+            # Récupération de l'offset (end du dernier élément)
+            offset=final_result[len(final_result)-1][0].end
+        else:
+            final_result2 = diarize_text(asr_result, diarization_result)
+            for elmt in final_result2:
+               # Segment // Speaker // Content  
+               newElmt=(Segment(elmt[0].start+offset,elmt[0].end+offset), elmt[1], elmt[2])
+               final_result.append(newElmt)
 
-        vtt.save('global_captions.vtt')
-    st.text("General vtt file generated.")
+            offset=offset+final_result2[len(final_result2)-1][0].end
+
+    return final_result
+
+# ################
+# Not used for the moment
+# ################
+def whisper_segments_to_vtt_list(result_segments):
+  """
+  This function iterates through all whisper
+  segements to format them into List with start time / end time / text.
+  """
+  data = "WEBVTT\n\n"
+  for idx, segment in enumerate(result_segments):
+    num = idx + 1
+    data+= f"{num}\n"
+    start_ = datetime.timedelta(seconds=segment.get('start'))
+    start_ = timedelta_to_videotime(str(start_))
+    end_ = datetime.timedelta(seconds=segment.get('end'))
+    end_ = timedelta_to_videotime(str(end_))
+    data += f"{start_} --> {end_}\n"
+    text = segment.get('text').strip()
+    data += f"{text}\n\n"
+  return data
+
+def whisper_segments_to_vtt_data(result_segments):
+  """
+  This function iterates through all whisper
+  segements to format them into List with start time / end time / text.
+  """
+  data = "WEBVTT\n\n"
+  for idx, segment in enumerate(result_segments):
+    num = idx + 1
+    data+= f"{num}\n"
+    start_ = datetime.timedelta(seconds=segment.get('start'))
+    start_ = timedelta_to_videotime(str(start_))
+    end_ = datetime.timedelta(seconds=segment.get('end'))
+    end_ = timedelta_to_videotime(str(end_))
+    data += f"{start_} --> {end_}\n"
+    text = segment.get('text').strip()
+    data += f"{text}\n\n"
+  return data
+
+def timedelta_to_videotime(delta):
     
-    return global_vtt_file
+  """
+  Here's a janky way to format a 
+  datetime.timedelta to match 
+  the format of vtt timecodes. 
+  """
+  parts = delta.split(":")
+  if len(parts[0]) == 1:
+    parts[0] = f"0{parts[0]}"
+  new_data = ":".join(parts)
+  parts2 = new_data.split(".")
+  if len(parts2) == 1:
+    parts2.append("000")
+  elif len(parts2) == 2:
+    parts2[1] = parts2[1][:2]
+  final_data = ".".join(parts2)
+  return final_data
+
+# ################
+# / Not used for the moment
+# ################
